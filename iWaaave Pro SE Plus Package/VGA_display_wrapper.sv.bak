@@ -1,0 +1,183 @@
+//
+// Author: Jim He
+//
+// Assignment: EE 271 Final Project: iWaaave Pro - Audio Signal Processing & Waveform Display
+//
+// Date Started: March 13, 2026
+//
+// Date Completed: March 13, 2026
+//
+// Description: This module is the top level wrapper for the VGA external monitor control.  
+//
+	
+
+// Displays both amplitude and FFT bar graphs simultaneously
+// on a 640x480 VGA display.
+//
+// Layout:
+//   Top half    (y: 0..238)   = Amplitude waveform (green bars)
+//   Divider     (y: 239..240) = Gray separator line
+//   Bottom half (y: 241..479) = FFT frequency spectrum (red bars)
+//
+// Bar graph:
+//   16 columns, each 40 pixels wide (640/16)
+//   Each half is 240 pixels tall, 16 height levels -> 15 px per unit
+//   Bars grow upward from the baseline of each half
+// ============================================================
+
+
+module VGA_display_wrapper (
+	// System
+	input  logic        CLOCK_50,
+	input  logic        reset,
+	
+	// Data inputs: column heights for both modes (16 columns x 5-bit height each)
+	input  logic [4:0]  amp_column_heights [0:15],
+	input  logic [4:0]  fft_column_heights [0:15],
+	
+	// VGA physical output pins
+	output logic [7:0]  VGA_R,
+	output logic [7:0]  VGA_G,
+	output logic [7:0]  VGA_B,
+	output logic        VGA_BLANK_N,
+	output logic        VGA_CLK,
+	output logic        VGA_HS,
+	output logic        VGA_SYNC_N,
+	output logic        VGA_VS
+);
+
+	// --------------------------------------------------------
+	// VGA Driver Interface Signals
+	// --------------------------------------------------------
+	logic [9:0] vga_x;
+	logic [8:0] vga_y;
+	logic [7:0] vga_r, vga_g, vga_b;
+	
+	// Instantiate the VGA video driver at native 640x480
+	video_driver #(.WIDTH(640), .HEIGHT(480)) vga_driver_inst (
+		.CLOCK_50    (CLOCK_50),
+		.reset       (reset),
+		.x           (vga_x),
+		.y           (vga_y),
+		.r           (vga_r),
+		.g           (vga_g),
+		.b           (vga_b),
+		.VGA_R       (VGA_R),
+		.VGA_G       (VGA_G),
+		.VGA_B       (VGA_B),
+		.VGA_BLANK_N (VGA_BLANK_N),
+		.VGA_CLK     (VGA_CLK),
+		.VGA_HS      (VGA_HS),
+		.VGA_SYNC_N  (VGA_SYNC_N),
+		.VGA_VS      (VGA_VS)
+	);
+	
+	
+	// --------------------------------------------------------
+	// Snapshot Registers
+	// --------------------------------------------------------
+	// Latch the column heights so VGA rendering sees a stable,
+	// consistent frame even if audio processing updates mid-scan.
+	// --------------------------------------------------------
+	logic [4:0] amp_snap [0:15];
+	logic [4:0] fft_snap [0:15];
+	
+	always_ff @(posedge CLOCK_50) begin
+		if (reset) begin
+			for (int i = 0; i < 16; i++) begin
+				amp_snap[i] <= 5'd0;
+				fft_snap[i] <= 5'd0;
+			end
+		end else begin
+			for (int i = 0; i < 16; i++) begin
+				amp_snap[i] <= amp_column_heights[i];
+				fft_snap[i] <= fft_column_heights[i];
+			end
+		end
+	end
+	
+	
+	// --------------------------------------------------------
+	// Display Layout Parameters
+	// --------------------------------------------------------
+	localparam COL_WIDTH      = 40;   // 640 / 16 columns
+	localparam HALF_HEIGHT    = 240;  // 480 / 2
+	localparam BAR_UNIT       = 15;   // 240 / 16 levels
+	localparam COL_GAP        = 1;    // 1-pixel gap on each side of column
+	localparam DIVIDER_Y_TOP  = 239;  // Divider line top row
+	localparam DIVIDER_Y_BOT  = 240;  // Divider line bottom row
+	
+	
+	// --------------------------------------------------------
+	// Pixel Color Generation (combinational)
+	// --------------------------------------------------------
+	always_comb begin
+		// Default: black background
+		vga_r = 8'd0;
+		vga_g = 8'd0;
+		vga_b = 8'd0;
+		
+		// Column index and position within column
+		automatic int col_idx       = vga_x / COL_WIDTH;
+		automatic int pos_in_col    = vga_x % COL_WIDTH;
+		automatic int in_bar_region = (col_idx < 16) && 
+		                              (pos_in_col >= COL_GAP) && 
+		                              (pos_in_col < (COL_WIDTH - COL_GAP));
+		
+		// --------------------------------------------------
+		// Divider line between top and bottom halves
+		// --------------------------------------------------
+		if (vga_y == DIVIDER_Y_TOP || vga_y == DIVIDER_Y_BOT) begin
+			vga_r = 8'd80;
+			vga_g = 8'd80;
+			vga_b = 8'd80;
+		end
+		
+		// --------------------------------------------------
+		// Top half: Amplitude display (y = 0 to 238)
+		// --------------------------------------------------
+		else if (vga_y < HALF_HEIGHT) begin
+			if (in_bar_region) begin
+				automatic int bar_px_h  = amp_snap[col_idx] * BAR_UNIT;
+				automatic int bar_top_y = (HALF_HEIGHT - 1) - bar_px_h; // baseline at y=238
+				
+				if (vga_y > bar_top_y && vga_y < (HALF_HEIGHT - 1)) begin
+					// --- Lit green bar ---
+					vga_r = 8'd0;
+					vga_g = 8'd200;
+					vga_b = 8'd0;
+				end else begin
+					// --- Dark background tint ---
+					vga_r = 8'd5;
+					vga_g = 8'd10;
+					vga_b = 8'd5;
+				end
+			end
+		end
+		
+		// --------------------------------------------------
+		// Bottom half: FFT display (y = 241 to 479)
+		// --------------------------------------------------
+		else if (vga_y > DIVIDER_Y_BOT) begin
+			if (in_bar_region) begin
+				automatic int local_y     = vga_y - HALF_HEIGHT;  // 0..239 within bottom half
+				automatic int bar_px_h_f  = fft_snap[col_idx] * BAR_UNIT;
+				automatic int bar_top_y_f = (HALF_HEIGHT - 1) - bar_px_h_f;
+				
+				if (local_y > bar_top_y_f && local_y <= (HALF_HEIGHT - 1)) begin
+					// --- Lit red bar ---
+					vga_r = 8'd220;
+					vga_g = 8'd0;
+					vga_b = 8'd0;
+				end else begin
+					// --- Dark background tint ---
+					vga_r = 8'd10;
+					vga_g = 8'd5;
+					vga_b = 8'd5;
+				end
+			end
+		end
+		
+	end // always_comb
+
+endmodule
